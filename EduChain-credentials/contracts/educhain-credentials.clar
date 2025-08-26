@@ -1,7 +1,7 @@
 ;; EduChain Credentials - Soulbound NFT Certificates System
 ;; Issues non-transferable NFT certificates for educational achievements
 
-;; Constants
+;; --- Constants ---
 (define-constant CONTRACT-OWNER tx-sender)
 (define-constant ERR-NOT-AUTHORIZED (err u401))
 (define-constant ERR-CERTIFICATE-NOT-FOUND (err u404))
@@ -12,12 +12,12 @@
 (define-constant ERR-BATCH-LIMIT-EXCEEDED (err u409))
 (define-constant ERR-CERTIFICATE-EXPIRED (err u410))
 
-;; Data Variables
+;; --- Data Variables ---
 (define-data-var next-certificate-id uint u1)
 (define-data-var contract-uri (string-utf8 256) u"")
 (define-data-var max-batch-size uint u20)
 
-;; Data Maps
+;; --- Data Maps ---
 (define-map certificates
   uint
   {
@@ -72,10 +72,60 @@
     status: (string-ascii 10)
   })
 
-;; NFT Trait Implementation (Soulbound - Non-transferable)
+;; --- NFT Trait Implementation (Soulbound - Non-transferable) ---
 (define-non-fungible-token edu-certificate uint)
 
-;; Public Functions
+;; --- Private Helper Functions ---
+
+;; Helper function to check if a certificate matches skill level
+(define-private (certificate-matches-skill-level (cert-id uint) (target-skill-level (string-ascii 20)))
+  (match (map-get? certificates cert-id)
+    cert (and (not (get revoked cert)) (is-eq (get skill-level cert) target-skill-level))
+    false))
+
+;; Helper function to get valid certificate credits
+(define-private (get-certificate-credits (cert-id uint))
+  (match (map-get? certificates cert-id)
+    cert (if (and (not (get revoked cert)) 
+                 (match (get expiry-date cert)
+                   expiry (< block-height expiry)
+                   true))
+           (get credits cert)
+           u0)
+    u0))
+
+;; Helper function for batch processing
+(define-private (process-batch-certificate (data {recipient: principal, course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20)}))
+  (let ((certificate-id (var-get next-certificate-id))
+        (recipient (get recipient data)))
+    (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: (get course-name data)})) ERR-ALREADY-EXISTS)
+    
+    ;; Mint and store data
+    (try! (nft-mint? edu-certificate certificate-id recipient))
+    (map-set certificates certificate-id {
+      recipient: recipient,
+      issuer: tx-sender,
+      course-name: (get course-name data),
+      completion-date: block-height,
+      grade: (get grade data),
+      certificate-hash: "batch-issued", ;; Placeholder hash for batch
+      metadata-uri: (get metadata-uri data),
+      revoked: false,
+      expiry-date: none,
+      credits: (get credits data),
+      skill-level: (get skill-level data)
+    })
+    
+    ;; Update recipient and verification maps
+    (let ((current-certs (default-to (list) (map-get? recipient-certificates recipient))))
+      (map-set recipient-certificates recipient (unwrap! (as-max-len? (append current-certs certificate-id) u100) ERR-ALREADY-EXISTS)))
+    (map-set certificate-verification {recipient: recipient, course-name: (get course-name data)} certificate-id)
+    
+    (var-set next-certificate-id (+ certificate-id u1))
+    (ok certificate-id)
+  ))
+
+;; --- Public Functions ---
 
 ;; Add authorized issuer (only owner)
 (define-public (authorize-issuer (issuer principal) (institution (string-utf8 100)) (max-issuance uint))
@@ -91,7 +141,7 @@
     })
     (ok true)))
 
-;; Issue a certificate (only authorized issuers)
+;; Issue a single certificate
 (define-public (issue-certificate 
   (recipient principal) 
   (course-name (string-utf8 100)) 
@@ -109,57 +159,25 @@
     (asserts! (< (get issued-count issuer-info) (get max-issuance issuer-info)) ERR-NOT-AUTHORIZED)
     (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: course-name})) ERR-ALREADY-EXISTS)
     
-    ;; Mint soulbound NFT
     (try! (nft-mint? edu-certificate certificate-id recipient))
     
-    ;; Store certificate data
     (map-set certificates certificate-id {
-      recipient: recipient,
-      issuer: tx-sender,
-      course-name: course-name,
-      completion-date: block-height,
-      grade: grade,
-      certificate-hash: certificate-hash,
-      metadata-uri: metadata-uri,
-      revoked: false,
-      expiry-date: expiry-date,
-      credits: credits,
-      skill-level: skill-level
+      recipient: recipient, issuer: tx-sender, course-name: course-name, 
+      completion-date: block-height, grade: grade, certificate-hash: certificate-hash,
+      metadata-uri: metadata-uri, revoked: false, expiry-date: expiry-date,
+      credits: credits, skill-level: skill-level
     })
     
-    ;; Update recipient's certificate list (fixed list limit)
     (let ((current-certs (default-to (list) (map-get? recipient-certificates recipient))))
       (map-set recipient-certificates recipient (unwrap! (as-max-len? (append current-certs certificate-id) u100) ERR-ALREADY-EXISTS)))
     
-    ;; Add verification mapping
     (map-set certificate-verification {recipient: recipient, course-name: course-name} certificate-id)
-    
-    ;; Update issuer count
     (map-set authorized-issuers tx-sender (merge issuer-info {issued-count: (+ (get issued-count issuer-info) u1)}))
     
     (var-set next-certificate-id (+ certificate-id u1))
     (ok certificate-id)))
 
-;; Revoke a certificate
-(define-public (revoke-certificate (certificate-id uint))
-  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
-    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
-    (asserts! (not (get revoked cert)) ERR-ALREADY-EXISTS)
-    
-    (map-set certificates certificate-id (merge cert {revoked: true}))
-    (ok true)))
-
-;; Verify certificate authenticity
-(define-public (verify-certificate (certificate-id uint) (expected-hash (string-ascii 64)))
-  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
-    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
-    (ok (is-eq (get certificate-hash cert) expected-hash))))
-
-;; Prevent transfers (Soulbound implementation)
-(define-public (transfer (token-id uint) (sender principal) (recipient principal))
-  ERR-TRANSFER-RESTRICTED)
-
-;; NEW FUNCTION 1: Batch issue certificates
+;; Batch issue certificates
 (define-public (batch-issue-certificates 
   (recipients (list 20 principal))
   (course-name (string-utf8 100))
@@ -168,29 +186,77 @@
   (credits uint)
   (skill-level (string-ascii 20)))
   (let (
-    (batch-id (var-get next-certificate-id))
     (issuer-info (unwrap! (map-get? authorized-issuers tx-sender) ERR-INVALID-ISSUER))
     (batch-size (len recipients))
+    (batch-id (var-get next-certificate-id))
   )
     (asserts! (get active issuer-info) ERR-NOT-AUTHORIZED)
     (asserts! (<= batch-size (var-get max-batch-size)) ERR-BATCH-LIMIT-EXCEEDED)
     (asserts! (<= (+ (get issued-count issuer-info) batch-size) (get max-issuance issuer-info)) ERR-NOT-AUTHORIZED)
     
-    ;; Process batch
-    (let ((result (fold process-batch-certificate recipients (ok (list)))))
-      (match result
-        success (begin
-          (map-set batch-operations batch-id {
-            operator: tx-sender,
-            operation-type: "BATCH_ISSUE",
-            timestamp: block-height,
-            certificates: success,
-            status: "COMPLETED"
-          })
-          (ok success))
-        error (err error)))))
+    ;; Create data list for batch processing
+    (let ((batch-data (map 
+                        (lambda (recipient) 
+                          {recipient: recipient, course-name: course-name, grade: grade, metadata-uri: metadata-uri, credits: credits, skill-level: skill-level})
+                        recipients)))
+      ;; Process all certificates in batch
+      (let ((issued-ids (map process-batch-certificate batch-data)))
+        (asserts! (is-ok (fold check-batch-result issued-ids (ok (list)))) (unwrap-err (fold check-batch-result issued-ids (ok (list)))))
+        (map-set authorized-issuers tx-sender (merge issuer-info {issued-count: (+ (get issued-count issuer-info) batch-size)}))
+        (map-set batch-operations batch-id {
+          operator: tx-sender, operation-type: "BATCH_ISSUE", 
+          timestamp: block-height, certificates: (unwrap! (try-unwrap-list issued-ids) ERR-INVALID-PARAMETERS), status: "COMPLETED"
+        })
+        (ok (unwrap! (try-unwrap-list issued-ids) ERR-INVALID-PARAMETERS))
+      )
+    )
+  ))
 
-;; NEW FUNCTION 2: Create course template
+;; Helper function to check batch results
+(define-private (check-batch-result (result (response uint uint)) (acc (response (list 20 uint) uint)))
+  (match result 
+    success (match acc
+              acc-list (ok (unwrap! (as-max-len? (append acc-list success) u20) (err u999)))
+              acc-err (err acc-err))
+    error (err error)))
+
+;; Helper function to unwrap list of results
+(define-private (try-unwrap-list (results (list 20 (response uint uint))))
+  (fold unwrap-and-append results (ok (list))))
+
+(define-private (unwrap-and-append (item (response uint uint)) (acc (response (list 20 uint) uint)))
+  (match item
+    success (match acc
+              current-list (ok (unwrap! (as-max-len? (append current-list success) u20) (err u999)))
+              current-err (err current-err))
+    error (err error)))
+
+;; Revoke a certificate
+(define-public (revoke-certificate (certificate-id uint))
+  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get revoked cert)) ERR-ALREADY-EXISTS)
+    (map-set certificates certificate-id (merge cert {revoked: true}))
+    (ok true)))
+
+;; Update certificate metadata
+(define-public (update-certificate-metadata (certificate-id uint) (new-metadata-uri (string-utf8 256)))
+  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
+    (map-set certificates certificate-id (merge cert {metadata-uri: new-metadata-uri}))
+    (ok true)))
+
+;; Extend certificate expiry
+(define-public (extend-certificate-expiry (certificate-id uint) (new-expiry uint))
+  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
+    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
+    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
+    (asserts! (> new-expiry block-height) ERR-INVALID-PARAMETERS)
+    (map-set certificates certificate-id (merge cert {expiry-date: (some new-expiry)}))
+    (ok true)))
+
+;; Create course template
 (define-public (create-course-template 
   (course-name (string-utf8 100))
   (duration-blocks uint)
@@ -201,147 +267,115 @@
     (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
     (asserts! (> duration-blocks u0) ERR-INVALID-PARAMETERS)
     (asserts! (> credits u0) ERR-INVALID-PARAMETERS)
-    
     (map-set course-templates course-name {
-      duration-blocks: duration-blocks,
-      required-grade: required-grade,
-      credits: credits,
-      prerequisites: prerequisites,
-      active: true
+      duration-blocks: duration-blocks, required-grade: required-grade, 
+      credits: credits, prerequisites: prerequisites, active: true
     })
     (ok true)))
 
-;; NEW FUNCTION 3: Update certificate metadata
-(define-public (update-certificate-metadata (certificate-id uint) (new-metadata-uri (string-utf8 256)))
-  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
-    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
-    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
-    
-    (map-set certificates certificate-id (merge cert {metadata-uri: new-metadata-uri}))
-    (ok true)))
+;; Prevent transfers (Soulbound implementation)
+(define-public (transfer (token-id uint) (sender principal) (recipient principal))
+  ERR-TRANSFER-RESTRICTED)
 
-;; NEW FUNCTION 4: Get certificates by skill level
-(define-read-only (get-certificates-by-skill-level (recipient principal) (target-skill-level (string-ascii 20)))
-  (let ((cert-ids (default-to (list) (map-get? recipient-certificates recipient))))
-    (get result (fold filter-certificates-by-skill cert-ids {skill-level: target-skill-level, result: (list)}))))
+;; --- Read-only Functions ---
 
-;; NEW FUNCTION 5: Extend certificate expiry
-(define-public (extend-certificate-expiry (certificate-id uint) (new-expiry uint))
-  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
-    (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
-    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
-    (asserts! (> new-expiry block-height) ERR-INVALID-PARAMETERS)
-    
-    (map-set certificates certificate-id (merge cert {expiry-date: (some new-expiry)}))
-    (ok true)))
-
-;; NEW FUNCTION 6: Get issuer statistics
-(define-public (get-issuer-statistics (issuer principal))
-  (let ((issuer-info (map-get? authorized-issuers issuer)))
-    (match issuer-info
-      info (ok {
-        issued-count: (get issued-count info),
-        max-issuance: (get max-issuance info),
-        remaining-quota: (- (get max-issuance info) (get issued-count info)),
-        active: (get active info),
-        institution: (get institution info)
-      })
-      (err ERR-INVALID-ISSUER))))
-
-;; Helper function for batch processing
-(define-private (process-batch-certificate (recipient principal) (acc-response (response (list 20 uint) uint)))
-  (match acc-response
-    acc-list 
-      (let ((cert-id (var-get next-certificate-id)))
-        (match (nft-mint? edu-certificate cert-id recipient)
-          success (begin
-            (var-set next-certificate-id (+ cert-id u1))
-            (ok (unwrap! (as-max-len? (append acc-list cert-id) u20) ERR-BATCH-LIMIT-EXCEEDED)))
-          error (err error)))
-    error (err error)))
-
-;; Helper function for filtering certificates by skill level
-(define-private (filter-certificates-by-skill (cert-id uint) (context {skill-level: (string-ascii 20), result: (list 100 uint)}))
-  (let ((target-skill (get skill-level context))
-        (current-result (get result context)))
-    (match (map-get? certificates cert-id)
-      cert (if (and (not (get revoked cert)) 
-                    (is-eq (get skill-level cert) target-skill))
-             {skill-level: target-skill, result: (unwrap! (as-max-len? (append current-result cert-id) u100) current-result)}
-             context)
-      context)))
-
-;; Read-only Functions
-
+;; Get certificate details
 (define-read-only (get-certificate (certificate-id uint))
   (map-get? certificates certificate-id))
 
+;; Verify certificate authenticity by hash
+(define-read-only (verify-certificate (certificate-id uint) (expected-hash (string-ascii 64)))
+  (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
+    (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
+    (ok (is-eq (get certificate-hash cert) expected-hash))))
+
+;; Get all certificate IDs for a recipient
 (define-read-only (get-recipient-certificates (recipient principal))
   (map-get? recipient-certificates recipient))
 
+;; Get certificates by skill level - FIXED VERSION
+(define-read-only (get-certificates-by-skill-level (recipient principal) (target-skill-level (string-ascii 20)))
+  (match (map-get? recipient-certificates recipient)
+    cert-ids (ok (fold check-skill-level cert-ids {target: target-skill-level, result: (list)}))
+    (ok (list))))
+
+;; Helper function for filtering certificates by skill level
+(define-private (check-skill-level (cert-id uint) (data {target: (string-ascii 20), result: (list 100 uint)}))
+  (let ((target-skill (get target data))
+        (current-result (get result data)))
+    (if (certificate-matches-skill-level cert-id target-skill)
+        {target: target-skill, result: (unwrap! (as-max-len? (append current-result cert-id) u100) current-result)}
+        data)))
+
+;; Get issuer statistics
+(define-read-only (get-issuer-statistics (issuer principal))
+  (match (map-get? authorized-issuers issuer)
+    info (ok {
+      issued-count: (get issued-count info),
+      max-issuance: (get max-issuance info),
+      remaining-quota: (- (get max-issuance info) (get issued-count info)),
+      active: (get active info),
+      institution: (get institution info)
+    })
+    (err ERR-INVALID-ISSUER)))
+    
+;; Verify if a recipient has completed a course
 (define-read-only (verify-completion (recipient principal) (course-name (string-utf8 100)))
   (match (map-get? certificate-verification {recipient: recipient, course-name: course-name})
-    cert-id (let ((cert (map-get? certificates cert-id)))
-              (match cert
-                certificate (and (not (get revoked certificate))
-                               (is-eq (get recipient certificate) recipient)
-                               (match (get expiry-date certificate)
-                                 expiry (< block-height expiry)
-                                 true))
-                false))
+    cert-id (let ((cert (unwrap! (map-get? certificates cert-id) (err false))))
+              (and (not (get revoked cert))
+                   (match (get expiry-date cert)
+                     expiry (< block-height expiry)
+                     true)))
     false))
 
+;; Get total credits for a recipient from valid certificates - FIXED VERSION
+(define-read-only (get-total-credits (recipient principal))
+  (match (map-get? recipient-certificates recipient)
+    cert-ids (fold + (map get-certificate-credits cert-ids) u0)
+    u0))
+
+;; Get info about an authorized issuer
 (define-read-only (get-issuer-info (issuer principal))
   (map-get? authorized-issuers issuer))
 
+;; Get total number of certificates issued
 (define-read-only (get-certificate-count)
-  (- (var-get next-certificate-id) u1))
+  (ok (- (var-get next-certificate-id) u1)))
 
+;; Check if an issuer is authorized and active
 (define-read-only (is-authorized-issuer (issuer principal))
   (match (map-get? authorized-issuers issuer)
     info (get active info)
     false))
 
+;; Get a course template
 (define-read-only (get-course-template (course-name (string-utf8 100)))
   (map-get? course-templates course-name))
 
+;; Check if a certificate is expired
 (define-read-only (is-certificate-expired (certificate-id uint))
   (match (map-get? certificates certificate-id)
     cert (match (get expiry-date cert)
-            expiry (>= block-height expiry)
-            false)
+           expiry (>= block-height expiry)
+           false)
     false))
 
-(define-read-only (get-total-credits (recipient principal))
-  (let ((cert-ids (default-to (list) (map-get? recipient-certificates recipient))))
-    (fold + 
-      (map (lambda (cert-id)
-        (match (map-get? certificates cert-id)
-          cert (if (and (not (get revoked cert)) 
-                       (match (get expiry-date cert)
-                         expiry (< block-height expiry)
-                         true))
-                 (get credits cert)
-                 u0)
-          u0)) cert-ids) u0)))
-
+;; Get info about a batch operation
 (define-read-only (get-batch-operation (batch-id uint))
   (map-get? batch-operations batch-id))
 
-;; NFT Trait Functions
+;; --- SIP-009 NFT Trait Functions ---
 (define-read-only (get-last-token-id)
   (ok (- (var-get next-certificate-id) u1)))
 
 (define-read-only (get-token-uri (token-id uint))
-  (let ((cert (map-get? certificates token-id)))
-    (match cert
-      certificate (ok (some (get metadata-uri certificate)))
-      (ok none))))
+  (ok (some (get metadata-uri (unwrap! (map-get? certificates token-id) (err none))))))
 
 (define-read-only (get-owner (token-id uint))
   (ok (nft-get-owner? edu-certificate token-id)))
 
-;; Contract metadata
+;; --- Contract Metadata ---
 (define-read-only (get-contract-uri)
   (ok (var-get contract-uri)))
 
