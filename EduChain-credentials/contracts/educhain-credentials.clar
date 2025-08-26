@@ -291,7 +291,7 @@
 ;; Get certificates by skill level - FIXED VERSION
 (define-read-only (get-certificates-by-skill-level (recipient principal) (target-skill-level (string-ascii 20)))
   (match (map-get? recipient-certificates recipient)
-    cert-ids (ok (fold check-skill-level cert-ids {target: target-skill-level, result: (list)}))
+    cert-ids (ok (get result (fold check-skill-level cert-ids {target: target-skill-level, result: (list)})))
     (ok (list))))
 
 ;; Helper function for filtering certificates by skill level
@@ -299,7 +299,9 @@
   (let ((target-skill (get target data))
         (current-result (get result data)))
     (if (certificate-matches-skill-level cert-id target-skill)
-        {target: target-skill, result: (unwrap! (as-max-len? (append current-result cert-id) u100) current-result)}
+        (match (as-max-len? (append current-result cert-id) u100)
+          new-result {target: target-skill, result: new-result}
+          {target: target-skill, result: current-result})
         {target: target-skill, result: current-result})))
 
 ;; Get issuer statistics
@@ -317,11 +319,12 @@
 ;; Verify if a recipient has completed a course
 (define-read-only (verify-completion (recipient principal) (course-name (string-utf8 100)))
   (match (map-get? certificate-verification {recipient: recipient, course-name: course-name})
-    cert-id (let ((cert (unwrap! (map-get? certificates cert-id) (err false))))
-              (and (not (get revoked cert))
-                   (match (get expiry-date cert)
-                     expiry (< stacks-block-height expiry)
-                     true)))
+    cert-id (match (map-get? certificates cert-id)
+              cert (and (not (get revoked cert))
+                       (match (get expiry-date cert)
+                         expiry (< stacks-block-height expiry)
+                         true))
+              false)
     false))
 
 ;; Get total credits for a recipient from valid certificates - FIXED VERSION
