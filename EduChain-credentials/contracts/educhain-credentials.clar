@@ -88,65 +88,57 @@
   (match (map-get? certificates cert-id)
     cert (if (and (not (get revoked cert)) 
                  (match (get expiry-date cert)
-                   expiry (< block-height expiry)
+                   expiry (< stacks-block-height expiry)
                    true))
            (get credits cert)
            u0)
     u0))
 
-;; Helper function for batch processing
-(define-private (process-single-batch-certificate (recipient principal) (course-name (string-utf8 100)) (grade (string-ascii 10)) (metadata-uri (string-utf8 256)) (credits uint) (skill-level (string-ascii 20)))
+;; Helper function for batch processing - simplified
+(define-private (process-batch-item (recipient principal) (params {course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20)}))
   (let ((certificate-id (var-get next-certificate-id)))
-    (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: course-name})) ERR-ALREADY-EXISTS)
+    (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: (get course-name params)})) ERR-ALREADY-EXISTS)
     
     ;; Mint and store data
     (try! (nft-mint? edu-certificate certificate-id recipient))
     (map-set certificates certificate-id {
       recipient: recipient,
       issuer: tx-sender,
-      course-name: course-name,
-      completion-date: block-height,
-      grade: grade,
-      certificate-hash: "batch-issued", ;; Placeholder hash for batch
-      metadata-uri: metadata-uri,
+      course-name: (get course-name params),
+      completion-date: stacks-block-height,
+      grade: (get grade params),
+      certificate-hash: "batch-issued",
+      metadata-uri: (get metadata-uri params),
       revoked: false,
       expiry-date: none,
-      credits: credits,
-      skill-level: skill-level
+      credits: (get credits params),
+      skill-level: (get skill-level params)
     })
     
     ;; Update recipient and verification maps
     (let ((current-certs (default-to (list) (map-get? recipient-certificates recipient))))
       (map-set recipient-certificates recipient (unwrap! (as-max-len? (append current-certs certificate-id) u100) ERR-ALREADY-EXISTS)))
-    (map-set certificate-verification {recipient: recipient, course-name: course-name} certificate-id)
+    (map-set certificate-verification {recipient: recipient, course-name: (get course-name params)} certificate-id)
     
     (var-set next-certificate-id (+ certificate-id u1))
     (ok certificate-id)
   ))
 
-;; Helper function to process batch using fold
-(define-private (process-batch-fold (recipient principal) (acc {course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20), results: (list 20 uint), success: bool}))
-  (if (get success acc)
-    (match (process-single-batch-certificate recipient (get course-name acc) (get grade acc) (get metadata-uri acc) (get credits acc) (get skill-level acc))
+;; Helper function to accumulate successful certificate IDs
+(define-private (accumulate-cert-id (recipient principal) (acc {params: {course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20)}, ids: (list 20 uint), failed: bool}))
+  (if (get failed acc)
+    acc
+    (match (process-batch-item recipient (get params acc))
       success-id {
-        course-name: (get course-name acc),
-        grade: (get grade acc), 
-        metadata-uri: (get metadata-uri acc),
-        credits: (get credits acc),
-        skill-level: (get skill-level acc),
-        results: (unwrap! (as-max-len? (append (get results acc) success-id) u20) (get results acc)),
-        success: true
+        params: (get params acc),
+        ids: (unwrap! (as-max-len? (append (get ids acc) success-id) u20) acc),
+        failed: false
       }
       error {
-        course-name: (get course-name acc),
-        grade: (get grade acc),
-        metadata-uri: (get metadata-uri acc), 
-        credits: (get credits acc),
-        skill-level: (get skill-level acc),
-        results: (get results acc),
-        success: false
-      })
-    acc))
+        params: (get params acc),
+        ids: (get ids acc),
+        failed: true
+      })))
 
 ;; --- Public Functions ---
 
@@ -186,7 +178,7 @@
     
     (map-set certificates certificate-id {
       recipient: recipient, issuer: tx-sender, course-name: course-name, 
-      completion-date: block-height, grade: grade, certificate-hash: certificate-hash,
+      completion-date: stacks-block-height, grade: grade, certificate-hash: certificate-hash,
       metadata-uri: metadata-uri, revoked: false, expiry-date: expiry-date,
       credits: credits, skill-level: skill-level
     })
@@ -212,27 +204,20 @@
     (issuer-info (unwrap! (map-get? authorized-issuers tx-sender) ERR-INVALID-ISSUER))
     (batch-size (len recipients))
     (batch-id (var-get next-certificate-id))
+    (params {course-name: course-name, grade: grade, metadata-uri: metadata-uri, credits: credits, skill-level: skill-level})
   )
     (asserts! (get active issuer-info) ERR-NOT-AUTHORIZED)
     (asserts! (<= batch-size (var-get max-batch-size)) ERR-BATCH-LIMIT-EXCEEDED)
     (asserts! (<= (+ (get issued-count issuer-info) batch-size) (get max-issuance issuer-info)) ERR-NOT-AUTHORIZED)
     
     ;; Process all certificates using fold
-    (let ((batch-result (fold process-batch-fold recipients {
-            course-name: course-name,
-            grade: grade,
-            metadata-uri: metadata-uri,
-            credits: credits,
-            skill-level: skill-level,
-            results: (list),
-            success: true
-          })))
-      (asserts! (get success batch-result) ERR-INVALID-PARAMETERS)
-      (let ((issued-ids (get results batch-result)))
+    (let ((batch-result (fold accumulate-cert-id recipients {params: params, ids: (list), failed: false})))
+      (asserts! (not (get failed batch-result)) ERR-INVALID-PARAMETERS)
+      (let ((issued-ids (get ids batch-result)))
         (map-set authorized-issuers tx-sender (merge issuer-info {issued-count: (+ (get issued-count issuer-info) batch-size)}))
         (map-set batch-operations batch-id {
           operator: tx-sender, operation-type: "BATCH_ISSUE", 
-          timestamp: block-height, certificates: issued-ids, status: "COMPLETED"
+          timestamp: stacks-block-height, certificates: issued-ids, status: "COMPLETED"
         })
         (ok issued-ids)
       )
@@ -262,7 +247,7 @@
   (let ((cert (unwrap! (map-get? certificates certificate-id) ERR-CERTIFICATE-NOT-FOUND)))
     (asserts! (is-eq tx-sender (get issuer cert)) ERR-NOT-AUTHORIZED)
     (asserts! (not (get revoked cert)) ERR-CERTIFICATE-NOT-FOUND)
-    (asserts! (> new-expiry block-height) ERR-INVALID-PARAMETERS)
+    (asserts! (> new-expiry stacks-block-height) ERR-INVALID-PARAMETERS)
     (map-set certificates certificate-id (merge cert {expiry-date: (some new-expiry)}))
     (ok true)))
 
@@ -315,7 +300,7 @@
         (current-result (get result data)))
     (if (certificate-matches-skill-level cert-id target-skill)
         {target: target-skill, result: (unwrap! (as-max-len? (append current-result cert-id) u100) current-result)}
-        data)))
+        {target: target-skill, result: current-result})))
 
 ;; Get issuer statistics
 (define-read-only (get-issuer-statistics (issuer principal))
@@ -335,7 +320,7 @@
     cert-id (let ((cert (unwrap! (map-get? certificates cert-id) (err false))))
               (and (not (get revoked cert))
                    (match (get expiry-date cert)
-                     expiry (< block-height expiry)
+                     expiry (< stacks-block-height expiry)
                      true)))
     false))
 
@@ -367,7 +352,7 @@
 (define-read-only (is-certificate-expired (certificate-id uint))
   (match (map-get? certificates certificate-id)
     cert (match (get expiry-date cert)
-           expiry (>= block-height expiry)
+           expiry (>= stacks-block-height expiry)
            false)
     false))
 
