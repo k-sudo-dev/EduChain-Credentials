@@ -42,3 +42,27 @@
 
 ;; Prevent transfers (Soulbound implementation)
 (define-public (transfer ...))
+
+;; NEW FUNCTION 1: Batch issue certificates
+(define-public (batch-issue-certificates ...))
+
+;; NEW FUNCTION 2: Create course template
+(define-public (create-course-template ...))
+
+;; NEW FUNCTION 3: Update certificate metadata
+(define-public (update-certificate-metadata ...))
+
+;; NEW FUNCTION 4: Get certificates by skill level
+(define-read-only (get-certificates-by-skill-level ...))
+
+;; NEW FUNCTION 5: Extend certificate expiry
+(define-public (extend-certificate-expiry ...))
+
+;; NEW FUNCTION 6: Get issuer statistics
+(define-public (get-issuer-statistics ...))
+
+;; Helper function for batch processing
+(define-private (process-batch-certificate ...))
+
+;; Helper function for filtering certificates by skill level
+(define-private (filter-certificates-by-skill ...))
