@@ -66,3 +66,25 @@
 
 ;; Helper function for filtering certificates by skill level
 (define-private (filter-certificates-by-skill ...))
+
+;; Read-only Functions
+(define-read-only (get-certificate ...))
+(define-read-only (get-recipient-certificates ...))
+(define-read-only (verify-completion ...))
+(define-read-only (get-issuer-info ...))
+(define-read-only (get-certificate-count ...))
+(define-read-only (is-authorized-issuer ...))
+(define-read-only (get-course-template ...))
+(define-read-only (is-certificate-expired ...))
+(define-read-only (get-total-credits ...))
+(define-read-only (get-batch-operation ...))
+
+;; NFT Trait Functions
+(define-read-only (get-last-token-id ...))
+(define-read-only (get-token-uri ...))
+(define-read-only (get-owner ...))
+
+;; Contract metadata
+(define-read-only (get-contract-uri ...))
+(define-public (set-contract-uri ...))
+(define-public (set-max-batch-size ...))
