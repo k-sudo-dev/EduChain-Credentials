@@ -27,3 +27,18 @@
 
 ;; NFT Trait Implementation (Soulbound - Non-transferable)
 (define-non-fungible-token edu-certificate uint)
+
+;; Add authorized issuer
+(define-public (authorize-issuer ...))
+
+;; Issue a certificate
+(define-public (issue-certificate ...))
+
+;; Revoke a certificate
+(define-public (revoke-certificate ...))
+
+;; Verify certificate authenticity
+(define-public (verify-certificate ...))
+
+;; Prevent transfers (Soulbound implementation)
+(define-public (transfer ...))
