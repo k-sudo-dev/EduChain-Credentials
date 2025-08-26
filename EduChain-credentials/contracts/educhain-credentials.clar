@@ -95,35 +95,58 @@
     u0))
 
 ;; Helper function for batch processing
-(define-private (process-batch-certificate (data {recipient: principal, course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20)}))
-  (let ((certificate-id (var-get next-certificate-id))
-        (recipient (get recipient data)))
-    (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: (get course-name data)})) ERR-ALREADY-EXISTS)
+(define-private (process-single-batch-certificate (recipient principal) (course-name (string-utf8 100)) (grade (string-ascii 10)) (metadata-uri (string-utf8 256)) (credits uint) (skill-level (string-ascii 20)))
+  (let ((certificate-id (var-get next-certificate-id)))
+    (asserts! (is-none (map-get? certificate-verification {recipient: recipient, course-name: course-name})) ERR-ALREADY-EXISTS)
     
     ;; Mint and store data
     (try! (nft-mint? edu-certificate certificate-id recipient))
     (map-set certificates certificate-id {
       recipient: recipient,
       issuer: tx-sender,
-      course-name: (get course-name data),
+      course-name: course-name,
       completion-date: block-height,
-      grade: (get grade data),
+      grade: grade,
       certificate-hash: "batch-issued", ;; Placeholder hash for batch
-      metadata-uri: (get metadata-uri data),
+      metadata-uri: metadata-uri,
       revoked: false,
       expiry-date: none,
-      credits: (get credits data),
-      skill-level: (get skill-level data)
+      credits: credits,
+      skill-level: skill-level
     })
     
     ;; Update recipient and verification maps
     (let ((current-certs (default-to (list) (map-get? recipient-certificates recipient))))
       (map-set recipient-certificates recipient (unwrap! (as-max-len? (append current-certs certificate-id) u100) ERR-ALREADY-EXISTS)))
-    (map-set certificate-verification {recipient: recipient, course-name: (get course-name data)} certificate-id)
+    (map-set certificate-verification {recipient: recipient, course-name: course-name} certificate-id)
     
     (var-set next-certificate-id (+ certificate-id u1))
     (ok certificate-id)
   ))
+
+;; Helper function to process batch using fold
+(define-private (process-batch-fold (recipient principal) (acc {course-name: (string-utf8 100), grade: (string-ascii 10), metadata-uri: (string-utf8 256), credits: uint, skill-level: (string-ascii 20), results: (list 20 uint), success: bool}))
+  (if (get success acc)
+    (match (process-single-batch-certificate recipient (get course-name acc) (get grade acc) (get metadata-uri acc) (get credits acc) (get skill-level acc))
+      success-id {
+        course-name: (get course-name acc),
+        grade: (get grade acc), 
+        metadata-uri: (get metadata-uri acc),
+        credits: (get credits acc),
+        skill-level: (get skill-level acc),
+        results: (unwrap! (as-max-len? (append (get results acc) success-id) u20) (get results acc)),
+        success: true
+      }
+      error {
+        course-name: (get course-name acc),
+        grade: (get grade acc),
+        metadata-uri: (get metadata-uri acc), 
+        credits: (get credits acc),
+        skill-level: (get skill-level acc),
+        results: (get results acc),
+        success: false
+      })
+    acc))
 
 ;; --- Public Functions ---
 
@@ -194,42 +217,29 @@
     (asserts! (<= batch-size (var-get max-batch-size)) ERR-BATCH-LIMIT-EXCEEDED)
     (asserts! (<= (+ (get issued-count issuer-info) batch-size) (get max-issuance issuer-info)) ERR-NOT-AUTHORIZED)
     
-    ;; Create data list for batch processing
-    (let ((batch-data (map 
-                        (lambda (recipient) 
-                          {recipient: recipient, course-name: course-name, grade: grade, metadata-uri: metadata-uri, credits: credits, skill-level: skill-level})
-                        recipients)))
-      ;; Process all certificates in batch
-      (let ((issued-ids (map process-batch-certificate batch-data)))
-        (asserts! (is-ok (fold check-batch-result issued-ids (ok (list)))) (unwrap-err (fold check-batch-result issued-ids (ok (list)))))
+    ;; Process all certificates using fold
+    (let ((batch-result (fold process-batch-fold recipients {
+            course-name: course-name,
+            grade: grade,
+            metadata-uri: metadata-uri,
+            credits: credits,
+            skill-level: skill-level,
+            results: (list),
+            success: true
+          })))
+      (asserts! (get success batch-result) ERR-INVALID-PARAMETERS)
+      (let ((issued-ids (get results batch-result)))
         (map-set authorized-issuers tx-sender (merge issuer-info {issued-count: (+ (get issued-count issuer-info) batch-size)}))
         (map-set batch-operations batch-id {
           operator: tx-sender, operation-type: "BATCH_ISSUE", 
-          timestamp: block-height, certificates: (unwrap! (try-unwrap-list issued-ids) ERR-INVALID-PARAMETERS), status: "COMPLETED"
+          timestamp: block-height, certificates: issued-ids, status: "COMPLETED"
         })
-        (ok (unwrap! (try-unwrap-list issued-ids) ERR-INVALID-PARAMETERS))
+        (ok issued-ids)
       )
     )
   ))
 
-;; Helper function to check batch results
-(define-private (check-batch-result (result (response uint uint)) (acc (response (list 20 uint) uint)))
-  (match result 
-    success (match acc
-              acc-list (ok (unwrap! (as-max-len? (append acc-list success) u20) (err u999)))
-              acc-err (err acc-err))
-    error (err error)))
 
-;; Helper function to unwrap list of results
-(define-private (try-unwrap-list (results (list 20 (response uint uint))))
-  (fold unwrap-and-append results (ok (list))))
-
-(define-private (unwrap-and-append (item (response uint uint)) (acc (response (list 20 uint) uint)))
-  (match item
-    success (match acc
-              current-list (ok (unwrap! (as-max-len? (append current-list success) u20) (err u999)))
-              current-err (err current-err))
-    error (err error)))
 
 ;; Revoke a certificate
 (define-public (revoke-certificate (certificate-id uint))
